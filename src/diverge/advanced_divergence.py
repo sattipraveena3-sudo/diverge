@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 from scipy.signal import coherence
 from sklearn.metrics import mutual_info_score
 
@@ -21,7 +22,7 @@ def lag_aware_correlation_divergence(x: np.ndarray, y: np.ndarray, max_lag: int 
         if aa.size < 8 or np.std(aa) < 1e-9 or np.std(bb) < 1e-9:
             continue
         scores.append(abs(float(np.corrcoef(aa, bb)[0, 1])))
-    return 1.0 - max(scores, default=0.0)
+    return float(np.clip(1.0 - max(scores, default=0.0), 0.0, 1.0))
 
 
 def mutual_information_divergence(x: np.ndarray, y: np.ndarray, bins: int = 12) -> float:
@@ -53,23 +54,48 @@ def spectral_coherence_divergence(x: np.ndarray, y: np.ndarray, fs: float = 1.0,
     return float(np.clip(1.0 - np.nanmean(cxy), 0.0, 1.0))
 
 
-def multiscale_relational_divergence(x: np.ndarray, y: np.ndarray, windows: tuple[int, ...] = (30, 60, 120)) -> dict[str, np.ndarray]:
+def _interpolate_sparse(values: np.ndarray, computed: np.ndarray) -> np.ndarray:
+    series = pd.Series(np.where(computed, values, np.nan), dtype=float)
+    return series.interpolate(limit_direction="both").fillna(0.0).to_numpy()
+
+
+def multiscale_relational_divergence(
+    x: np.ndarray,
+    y: np.ndarray,
+    windows: tuple[int, ...] = (30, 60, 120),
+    stride: int = 1,
+    fs: float = 1.0,
+) -> dict[str, np.ndarray]:
+    """Compute relational divergence at selected anchor points and interpolate.
+
+    A stride larger than one is recommended for long physiological recordings.
+    It dramatically reduces repeated MI/coherence calculations while preserving a
+    dense output aligned with the original signal grid.
+    """
     a = np.asarray(x, dtype=float)
     b = np.asarray(y, dtype=float)
     if a.size != b.size:
         raise ValueError("signals must have equal length")
+    if stride < 1:
+        raise ValueError("stride must be >= 1")
     outputs: dict[str, np.ndarray] = {}
     for window in windows:
         lag = np.zeros(a.size)
         mi = np.zeros(a.size)
         coh = np.zeros(a.size)
-        for i in range(window - 1, a.size):
-            xs = a[i - window + 1 : i + 1]
-            ys = b[i - window + 1 : i + 1]
+        computed = np.zeros(a.size, dtype=bool)
+        anchors = list(range(window - 1, a.size, stride))
+        if anchors and anchors[-1] != a.size - 1:
+            anchors.append(a.size - 1)
+        for i in anchors:
+            start = max(0, i - window + 1)
+            xs = a[start : i + 1]
+            ys = b[start : i + 1]
             lag[i] = lag_aware_correlation_divergence(xs, ys, max_lag=max(1, window // 10))
             mi[i] = mutual_information_divergence(xs, ys)
-            coh[i] = spectral_coherence_divergence(xs, ys)
-        outputs[f"lagcorr_{window}"] = lag
-        outputs[f"mi_{window}"] = mi
-        outputs[f"coherence_{window}"] = coh
+            coh[i] = spectral_coherence_divergence(xs, ys, fs=fs)
+            computed[i] = True
+        outputs[f"lagcorr_{window}"] = _interpolate_sparse(lag, computed)
+        outputs[f"mi_{window}"] = _interpolate_sparse(mi, computed)
+        outputs[f"coherence_{window}"] = _interpolate_sparse(coh, computed)
     return outputs
