@@ -44,21 +44,36 @@ def build_ctu_features(frame: pd.DataFrame, fs: float = 4.0) -> pd.DataFrame:
         work[col] = work[col].interpolate(limit_direction="both").ffill().bfill()
     work["fhr_z"] = _robust_z(work["fhr"])
     work["uc_z"] = _robust_z(work["uc"])
-    work["fhr_slope"] = work["fhr_z"].diff(int(fs * 5)).fillna(0.0) / 5.0
-    work["uc_slope"] = work["uc_z"].diff(int(fs * 5)).fillna(0.0) / 5.0
-    window = int(fs * 60)
+    work["fhr_slope"] = work["fhr_z"].diff(max(1, int(fs * 5))).fillna(0.0) / 5.0
+    work["uc_slope"] = work["uc_z"].diff(max(1, int(fs * 5))).fillna(0.0) / 5.0
+    window = max(12, int(fs * 60))
     work["corr_div"] = rolling_cross_correlation_divergence(work.fhr_z, work.uc_z, window)
     work["resid_div"] = rolling_residual_divergence(work.fhr_z, work.uc_z, window)
-    work["dtw_div"] = rolling_dtw_divergence(work.fhr_z, work.uc_z, int(fs * 30), stride=max(1, int(fs * 5)))
-    multi = multiscale_relational_divergence(
-        work.fhr_z.to_numpy(), work.uc_z.to_numpy(),
-        windows=(int(fs * 30), int(fs * 60), int(fs * 120)),
+    # DTW is deliberately evaluated sparsely at 30-second anchors; the dense
+    # series is interpolated inside rolling_dtw_divergence.
+    work["dtw_div"] = rolling_dtw_divergence(
+        work.fhr_z,
+        work.uc_z,
+        window=max(12, int(fs * 30)),
+        stride=max(1, int(fs * 30)),
     )
-    # Rename sample-count keys back to seconds for stable manuscript labels.
+    multi = multiscale_relational_divergence(
+        work.fhr_z.to_numpy(),
+        work.uc_z.to_numpy(),
+        windows=(max(12, int(fs * 30)), max(12, int(fs * 60)), max(12, int(fs * 120))),
+        stride=max(1, int(fs * 10)),
+        fs=fs,
+    )
     mapping = {
-        f"lagcorr_{int(fs * 30)}": "lagcorr_30", f"lagcorr_{int(fs * 60)}": "lagcorr_60", f"lagcorr_{int(fs * 120)}": "lagcorr_120",
-        f"mi_{int(fs * 30)}": "mi_30", f"mi_{int(fs * 60)}": "mi_60", f"mi_{int(fs * 120)}": "mi_120",
-        f"coherence_{int(fs * 30)}": "coherence_30", f"coherence_{int(fs * 60)}": "coherence_60", f"coherence_{int(fs * 120)}": "coherence_120",
+        f"lagcorr_{max(12, int(fs * 30))}": "lagcorr_30",
+        f"lagcorr_{max(12, int(fs * 60))}": "lagcorr_60",
+        f"lagcorr_{max(12, int(fs * 120))}": "lagcorr_120",
+        f"mi_{max(12, int(fs * 30))}": "mi_30",
+        f"mi_{max(12, int(fs * 60))}": "mi_60",
+        f"mi_{max(12, int(fs * 120))}": "mi_120",
+        f"coherence_{max(12, int(fs * 30))}": "coherence_30",
+        f"coherence_{max(12, int(fs * 60))}": "coherence_60",
+        f"coherence_{max(12, int(fs * 120))}": "coherence_120",
     }
     for key, values in multi.items():
         work[mapping[key]] = values
