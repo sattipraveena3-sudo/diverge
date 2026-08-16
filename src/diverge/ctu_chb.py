@@ -71,4 +71,5 @@ def load_record(record_path: str | Path, fs: float = 4.0) -> tuple[pd.DataFrame,
 
 
 def discover_records(root: str | Path) -> list[Path]:
-    return sorted(Path(root).glob("*.hea"))
+    """Discover CTU-CHB header files beneath either a flat or recursively downloaded root."""
+    return sorted(Path(root).rglob("*.hea"))
