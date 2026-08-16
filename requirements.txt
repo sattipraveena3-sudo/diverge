@@ -9,7 +9,7 @@ streamlit==1.54.0
 plotly==6.5.2
 joblib==1.5.3
 pytest==9.0.2
-pytest-cov==7.0.0
+pytest-cov==7.1.0
 ruff==0.14.13
 black==26.1.0
 httpx==0.28.1
