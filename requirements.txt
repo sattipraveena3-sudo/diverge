@@ -8,6 +8,7 @@ pydantic==2.13.4
 streamlit==1.54.0
 plotly==6.5.2
 joblib==1.5.3
+wfdb==4.3.0
 pytest==9.0.2
 pytest-cov==7.0.0
 ruff==0.14.13
