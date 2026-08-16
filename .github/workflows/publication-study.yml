@@ -63,7 +63,7 @@ jobs:
           test -s docs/REAL_DATA_RESULTS.md
 
       - name: Upload publication bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: diverge-ctu-publication-results
           path: |
