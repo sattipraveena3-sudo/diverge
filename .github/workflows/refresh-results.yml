@@ -17,7 +17,7 @@ jobs:
       - run: pip install -e .
       - run: python scripts/evaluate.py
       - run: python scripts/render_results.py
-      - uses: peter-evans/create-pull-request@v7
+      - uses: peter-evans/create-pull-request@v8
         with:
           commit-message: refresh evaluation results
           title: Refresh evaluation results
