@@ -1,0 +1,69 @@
+name: CTU Publication Study
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publication-study.yml'
+      - 'scripts/run_publication_suite.py'
+      - 'src/diverge/**'
+      - 'requirements.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  publication-study:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      MPLBACKEND: Agg
+      PYTHONHASHSEED: '0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: pytest -q
+
+      - name: Download CTU-CHB v1.0.0 from PhysioNet
+        run: |
+          mkdir -p data/ctu_chb
+          wget -q -r -N -c -np \
+            https://physionet.org/files/ctu-uhb-ctgdb/1.0.0/ \
+            -P data/ctu_chb
+          test "$(find data/ctu_chb -name '*.hea' | wc -l)" -eq 552
+
+      - name: Run publication experiment suite
+        run: |
+          python scripts/run_publication_suite.py data/ctu_chb \
+            --output-dir artifacts/publication \
+            --folds 5 \
+            --repeats 3 \
+            --seed 42
+
+      - name: Verify publication outputs
+        run: |
+          test -s artifacts/publication/results.json
+          test -s artifacts/publication/all_predictions.csv
+          test -s artifacts/publication/all_fold_metrics.csv
+          test -s artifacts/publication/figures/ablation_auprc.png
+          test -s artifacts/publication/figures/horizon_auprc.png
+          test -s docs/REAL_DATA_RESULTS.md
+
+      - name: Upload publication bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: diverge-ctu-publication-results
+          path: |
+            artifacts/publication
+            docs/REAL_DATA_RESULTS.md
+          retention-days: 90
