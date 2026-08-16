@@ -9,6 +9,7 @@ on:
       - 'scripts/run_publication_suite.py'
       - 'src/diverge/**'
       - 'requirements.txt'
+      - 'pyproject.toml'
 
 permissions:
   contents: read
@@ -28,8 +29,10 @@ jobs:
           python-version: '3.12'
           cache: pip
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install dependencies and project
+        run: |
+          pip install -r requirements.txt
+          pip install -e . --no-deps
 
       - name: Run unit tests
         run: pytest -q
