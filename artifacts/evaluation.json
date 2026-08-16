@@ -1,0 +1,6 @@
+{
+  "data_source": "synthetic",
+  "divergence": {"precision": 0.642, "recall": 0.924, "f1": 0.757, "alert_time_s": 20.7, "lead_time_s": 699.3},
+  "baseline": {"precision": 1.0, "recall": 0.444, "f1": 0.615, "alert_time_s": 769.3, "lead_time_s": -49.3},
+  "lead_time_advantage_s": 748.6
+}

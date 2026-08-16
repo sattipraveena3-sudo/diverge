@@ -1,0 +1,25 @@
+name: Refresh evaluation results
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -e .
+      - run: python scripts/evaluate.py
+      - run: python scripts/render_results.py
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: refresh evaluation results
+          title: Refresh evaluation results
+          body: Automated weekly rerun of the reproducible evaluation pipeline. Review before merging.
+          branch: automation/refresh-results
