@@ -1,6 +1,28 @@
 {
   "data_source": "synthetic",
-  "divergence": {"precision": 0.642, "recall": 0.924, "f1": 0.757, "alert_time_s": 20.7, "lead_time_s": 699.3},
-  "baseline": {"precision": 1.0, "recall": 0.444, "f1": 0.615, "alert_time_s": 769.3, "lead_time_s": -49.3},
-  "lead_time_advantage_s": 748.6
+  "divergence": {
+    "precision": 0.5635377333077686,
+    "recall": 0.9776666666666667,
+    "f1": 0.7142482201321686,
+    "alert_time_s": 21.3,
+    "lead_time_s": 698.7,
+    "auroc": null,
+    "auprc": null,
+    "balanced_accuracy": null,
+    "mcc": null,
+    "false_alarm_rate_per_hour": null
+  },
+  "baseline": {
+    "precision": 1.0,
+    "recall": 0.44400000000000006,
+    "f1": 0.6149173061775208,
+    "alert_time_s": 769.3,
+    "lead_time_s": -49.3,
+    "auroc": null,
+    "auprc": null,
+    "balanced_accuracy": null,
+    "mcc": null,
+    "false_alarm_rate_per_hour": null
+  },
+  "lead_time_advantage_s": 748.0
 }
