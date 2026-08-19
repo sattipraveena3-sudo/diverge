@@ -12,13 +12,27 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 FEATURE_COLUMNS = [
-    "hr_z", "spo2_z", "hr_slope", "spo2_slope",
-    "corr_div", "resid_div", "dtw_div",
-    "lagcorr_30", "lagcorr_60", "lagcorr_120",
-    "mi_30", "mi_60", "mi_120",
-    "coherence_30", "coherence_60", "coherence_120",
-    "divergence", "divergence_velocity", "divergence_acceleration",
+    "hr_z",
+    "spo2_z",
+    "hr_slope",
+    "spo2_slope",
+    "corr_div",
+    "resid_div",
+    "dtw_div",
+    "lagcorr_30",
+    "lagcorr_60",
+    "lagcorr_120",
+    "mi_30",
+    "mi_60",
+    "mi_120",
+    "coherence_30",
+    "coherence_60",
+    "coherence_120",
+    "divergence",
+    "divergence_velocity",
+    "divergence_acceleration",
 ]
+
 
 @dataclass
 class DetectionResult:
@@ -31,25 +45,39 @@ def future_event_target(frame: pd.DataFrame, horizon_s: int = 120) -> np.ndarray
     y = np.zeros(len(event), dtype=int)
     positives = np.where(event == 1)[0]
     if len(positives):
-        y[max(0, positives[0] - horizon_s):] = 1
+        y[max(0, positives[0] - horizon_s) :] = 1
     return y
 
 
-def build_model(kind: Literal["logistic", "random_forest", "hist_gbm"] = "logistic", calibrated: bool = False):
+def build_model(
+    kind: Literal["logistic", "random_forest", "hist_gbm"] = "logistic", calibrated: bool = False
+):
     if kind == "logistic":
-        estimator = Pipeline([
-            ("scale", StandardScaler()),
-            ("clf", LogisticRegression(max_iter=2000, class_weight="balanced", random_state=42)),
-        ])
+        estimator = Pipeline(
+            [
+                ("scale", StandardScaler()),
+                (
+                    "clf",
+                    LogisticRegression(max_iter=2000, class_weight="balanced", random_state=42),
+                ),
+            ]
+        )
     elif kind == "random_forest":
         estimator = RandomForestClassifier(
-            n_estimators=400, max_depth=10, min_samples_leaf=4,
-            class_weight="balanced_subsample", random_state=42, n_jobs=-1,
+            n_estimators=400,
+            max_depth=10,
+            min_samples_leaf=4,
+            class_weight="balanced_subsample",
+            random_state=42,
+            n_jobs=-1,
         )
     elif kind == "hist_gbm":
         estimator = HistGradientBoostingClassifier(
-            max_iter=300, learning_rate=0.04, max_leaf_nodes=31,
-            l2_regularization=1.0, random_state=42,
+            max_iter=300,
+            learning_rate=0.04,
+            max_leaf_nodes=31,
+            l2_regularization=1.0,
+            random_state=42,
         )
     else:
         raise ValueError(f"unknown model kind: {kind}")
@@ -78,7 +106,9 @@ def threshold_baseline(frame: pd.DataFrame) -> DetectionResult:
     return DetectionResult(risk.to_numpy(), confidence)
 
 
-def select_threshold(y_true: np.ndarray, probability: np.ndarray, min_recall: float = 0.80) -> float:
+def select_threshold(
+    y_true: np.ndarray, probability: np.ndarray, min_recall: float = 0.80
+) -> float:
     y = np.asarray(y_true, dtype=int)
     p = np.asarray(probability, dtype=float)
     best_threshold, best_precision = 0.5, -1.0

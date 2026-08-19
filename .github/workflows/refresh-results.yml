@@ -5,21 +5,36 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
-  pull-requests: write
+
+concurrency:
+  group: refresh-evaluation-results
+  cancel-in-progress: false
+
 jobs:
   refresh:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
-      - run: pip install -e .
+          cache: pip
+      - run: pip install -e '.[dev]'
+      - run: ruff check .
+      - run: pytest -q
       - run: python scripts/evaluate.py
       - run: python scripts/render_results.py
-      - uses: peter-evans/create-pull-request@v7
-        with:
-          commit-message: refresh evaluation results
-          title: Refresh evaluation results
-          body: Automated weekly rerun of the reproducible evaluation pipeline. Review before merging.
-          branch: automation/refresh-results
+      - name: Commit refreshed reproducible outputs
+        run: |
+          git add artifacts/evaluation.json docs/RESULTS.md
+          if git diff --cached --quiet; then
+            echo "Evaluation outputs are already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "refresh evaluation results"
+          git push origin HEAD:main

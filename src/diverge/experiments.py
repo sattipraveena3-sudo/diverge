@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
-from typing import Iterable
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass
 
 import numpy as np
 import pandas as pd
@@ -48,7 +48,9 @@ def grouped_cross_validation(
             test_prob = model.predict_proba(test[FEATURE_COLUMNS])[:, 1]
             threshold = select_threshold(y_train, train_prob, min_recall=0.80)
             cal = calibration_metrics(y_test, test_prob)
-            results.append(FoldResult(fold, kind, cal.auroc, cal.auprc, cal.brier, cal.ece, threshold))
+            results.append(
+                FoldResult(fold, kind, cal.auroc, cal.auprc, cal.brier, cal.ece, threshold)
+            )
     return results
 
 
@@ -67,7 +69,9 @@ def summarize_folds(results: list[FoldResult]) -> dict[str, dict]:
     return summary
 
 
-def paired_model_test(results: list[FoldResult], reference: str, candidate: str, metric: str = "auprc") -> float:
+def paired_model_test(
+    results: list[FoldResult], reference: str, candidate: str, metric: str = "auprc"
+) -> float:
     table = pd.DataFrame([r.to_dict() for r in results])
     pivot = table.pivot(index="fold", columns="model", values=metric).dropna()
     if reference not in pivot or candidate not in pivot:

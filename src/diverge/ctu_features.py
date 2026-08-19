@@ -12,11 +12,21 @@ from .divergence import (
 
 CTU_RAW_FEATURES = ["fhr_z", "uc_z", "fhr_slope", "uc_slope"]
 CTU_DIVERGENCE_FEATURES = [
-    "corr_div", "resid_div", "dtw_div",
-    "lagcorr_30", "lagcorr_60", "lagcorr_120",
-    "mi_30", "mi_60", "mi_120",
-    "coherence_30", "coherence_60", "coherence_120",
-    "divergence", "divergence_velocity", "divergence_acceleration",
+    "corr_div",
+    "resid_div",
+    "dtw_div",
+    "lagcorr_30",
+    "lagcorr_60",
+    "lagcorr_120",
+    "mi_30",
+    "mi_60",
+    "mi_120",
+    "coherence_30",
+    "coherence_60",
+    "coherence_120",
+    "divergence",
+    "divergence_velocity",
+    "divergence_acceleration",
 ]
 CTU_FULL_FEATURES = CTU_RAW_FEATURES + CTU_DIVERGENCE_FEATURES
 

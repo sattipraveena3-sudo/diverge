@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -41,13 +41,15 @@ class FoldMetrics:
         return asdict(self)
 
 
-def expected_calibration_error(y_true: np.ndarray, probability: np.ndarray, bins: int = 10) -> float:
+def expected_calibration_error(
+    y_true: np.ndarray, probability: np.ndarray, bins: int = 10
+) -> float:
     y = np.asarray(y_true, dtype=int)
     p = np.asarray(probability, dtype=float)
     edges = np.linspace(0.0, 1.0, bins + 1)
     total = max(len(y), 1)
     error = 0.0
-    for lo, hi in zip(edges[:-1], edges[1:]):
+    for lo, hi in zip(edges[:-1], edges[1:], strict=True):
         mask = (p >= lo) & (p < hi if hi < 1.0 else p <= hi)
         if not np.any(mask):
             continue
@@ -62,7 +64,9 @@ def select_threshold(y_true: np.ndarray, probability: np.ndarray) -> float:
     return float(candidates[int(np.argmax(scores))])
 
 
-def classification_metrics(y_true: np.ndarray, probability: np.ndarray, threshold: float) -> FoldMetrics:
+def classification_metrics(
+    y_true: np.ndarray, probability: np.ndarray, threshold: float
+) -> FoldMetrics:
     y = np.asarray(y_true, dtype=int)
     p = np.asarray(probability, dtype=float)
     pred = p >= threshold
@@ -82,7 +86,9 @@ def classification_metrics(y_true: np.ndarray, probability: np.ndarray, threshol
     )
 
 
-def bootstrap_mean_ci(values: Iterable[float], confidence: float = 0.95, n_boot: int = 5000, seed: int = 42) -> dict[str, float]:
+def bootstrap_mean_ci(
+    values: Iterable[float], confidence: float = 0.95, n_boot: int = 5000, seed: int = 42
+) -> dict[str, float]:
     arr = np.asarray(list(values), dtype=float)
     if arr.size == 0:
         raise ValueError("values cannot be empty")
@@ -97,10 +103,17 @@ def bootstrap_mean_ci(values: Iterable[float], confidence: float = 0.95, n_boot:
 
 
 def make_model(seed: int = 42) -> Pipeline:
-    return Pipeline([
-        ("scale", StandardScaler()),
-        ("clf", LogisticRegression(max_iter=5000, class_weight="balanced", C=1.0, random_state=seed)),
-    ])
+    return Pipeline(
+        [
+            ("scale", StandardScaler()),
+            (
+                "clf",
+                LogisticRegression(
+                    max_iter=5000, class_weight="balanced", C=1.0, random_state=seed
+                ),
+            ),
+        ]
+    )
 
 
 def repeated_record_cv(
@@ -111,9 +124,35 @@ def repeated_record_cv(
     n_repeats: int = 3,
     seed: int = 42,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if n_splits < 2:
+        raise ValueError("n_splits must be at least 2")
+    if n_repeats < 1:
+        raise ValueError("n_repeats must be at least 1")
+    required = {outcome_column, "record_id", *feature_columns}
+    missing = required.difference(table.columns)
+    if missing:
+        raise ValueError(f"missing cross-validation columns: {sorted(missing)}")
+
     X = table[feature_columns].to_numpy(dtype=float)
     y = table[outcome_column].to_numpy(dtype=int)
-    cv = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=seed)
+    labels, counts = np.unique(y, return_counts=True)
+    if labels.size != 2:
+        raise ValueError(
+            "binary cross-validation requires both outcome classes; "
+            f"observed labels={labels.tolist()}"
+        )
+    effective_splits = min(n_splits, int(counts.min()))
+    if effective_splits < 2:
+        raise ValueError(
+            "binary cross-validation requires at least two records in each outcome class; "
+            f"class_counts={dict(zip(labels.tolist(), counts.tolist(), strict=True))}"
+        )
+
+    cv = RepeatedStratifiedKFold(
+        n_splits=effective_splits,
+        n_repeats=n_repeats,
+        random_state=seed,
+    )
     metric_rows: list[dict] = []
     prediction_rows: list[dict] = []
     for fold, (train_idx, test_idx) in enumerate(cv.split(X, y)):
@@ -124,24 +163,39 @@ def repeated_record_cv(
         test_prob = model.predict_proba(X[test_idx])[:, 1]
         metrics = classification_metrics(y[test_idx], test_prob, threshold)
         metric_rows.append({"fold": fold, "threshold": threshold, **metrics.to_dict()})
-        for idx, prob in zip(test_idx, test_prob):
-            prediction_rows.append({
-                "fold": fold,
-                "record_id": str(table.iloc[idx]["record_id"]),
-                "outcome": int(y[idx]),
-                "probability": float(prob),
-                "threshold": threshold,
-                "prediction": int(prob >= threshold),
-            })
+        for idx, prob in zip(test_idx, test_prob, strict=True):
+            prediction_rows.append(
+                {
+                    "fold": fold,
+                    "record_id": str(table.iloc[idx]["record_id"]),
+                    "outcome": int(y[idx]),
+                    "probability": float(prob),
+                    "threshold": threshold,
+                    "prediction": int(prob >= threshold),
+                }
+            )
     return pd.DataFrame(metric_rows), pd.DataFrame(prediction_rows)
 
 
 def summarize_metric_frame(metrics: pd.DataFrame) -> dict[str, dict[str, float]]:
-    names = ["auroc", "auprc", "brier", "ece", "balanced_accuracy", "mcc", "precision", "recall", "specificity", "f1"]
+    names = [
+        "auroc",
+        "auprc",
+        "brier",
+        "ece",
+        "balanced_accuracy",
+        "mcc",
+        "precision",
+        "recall",
+        "specificity",
+        "f1",
+    ]
     return {name: bootstrap_mean_ci(metrics[name].to_numpy()) for name in names}
 
 
-def paired_variant_test(a: pd.DataFrame, b: pd.DataFrame, metric: str = "auprc") -> dict[str, float]:
+def paired_variant_test(
+    a: pd.DataFrame, b: pd.DataFrame, metric: str = "auprc"
+) -> dict[str, float]:
     if len(a) != len(b):
         raise ValueError("paired metric frames must have the same number of folds")
     delta = b[metric].to_numpy(dtype=float) - a[metric].to_numpy(dtype=float)
@@ -150,7 +204,12 @@ def paired_variant_test(a: pd.DataFrame, b: pd.DataFrame, metric: str = "auprc")
     else:
         p_value = float(wilcoxon(delta, alternative="two-sided").pvalue)
     ci = bootstrap_mean_ci(delta)
-    return {"mean_delta": ci["mean"], "lower": ci["lower"], "upper": ci["upper"], "p_value": p_value}
+    return {
+        "mean_delta": ci["mean"],
+        "lower": ci["lower"],
+        "upper": ci["upper"],
+        "p_value": p_value,
+    }
 
 
 def calibration_points(predictions: pd.DataFrame, bins: int = 10) -> pd.DataFrame:

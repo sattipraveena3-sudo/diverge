@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
-from typing import Callable, Iterable
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass
 
 import numpy as np
-from sklearn.calibration import calibration_curve
-from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 from scipy.stats import wilcoxon
+from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 
 
 @dataclass(frozen=True)
@@ -30,7 +29,9 @@ class CalibrationMetrics:
         return asdict(self)
 
 
-def bootstrap_ci(values: Iterable[float], confidence: float = 0.95, n_bootstrap: int = 2000, seed: int = 42) -> ConfidenceInterval:
+def bootstrap_ci(
+    values: Iterable[float], confidence: float = 0.95, n_bootstrap: int = 2000, seed: int = 42
+) -> ConfidenceInterval:
     arr = np.asarray(list(values), dtype=float)
     if arr.size == 0:
         raise ValueError("values cannot be empty")
@@ -39,15 +40,19 @@ def bootstrap_ci(values: Iterable[float], confidence: float = 0.95, n_bootstrap:
     for i in range(n_bootstrap):
         means[i] = rng.choice(arr, size=arr.size, replace=True).mean()
     alpha = (1.0 - confidence) / 2.0
-    return ConfidenceInterval(float(arr.mean()), float(np.quantile(means, alpha)), float(np.quantile(means, 1.0 - alpha)))
+    return ConfidenceInterval(
+        float(arr.mean()), float(np.quantile(means, alpha)), float(np.quantile(means, 1.0 - alpha))
+    )
 
 
-def expected_calibration_error(y_true: np.ndarray, probability: np.ndarray, bins: int = 10) -> float:
+def expected_calibration_error(
+    y_true: np.ndarray, probability: np.ndarray, bins: int = 10
+) -> float:
     y = np.asarray(y_true, dtype=int)
     p = np.asarray(probability, dtype=float)
     edges = np.linspace(0.0, 1.0, bins + 1)
     ece = 0.0
-    for lo, hi in zip(edges[:-1], edges[1:]):
+    for lo, hi in zip(edges[:-1], edges[1:], strict=True):
         mask = (p >= lo) & (p < hi if hi < 1.0 else p <= hi)
         if not mask.any():
             continue
@@ -78,7 +83,9 @@ def paired_wilcoxon(reference: Iterable[float], candidate: Iterable[float]) -> f
     return float(wilcoxon(a, b, alternative="two-sided").pvalue)
 
 
-def perturb_signal(x: np.ndarray, noise_std: float = 0.0, dropout_rate: float = 0.0, seed: int = 42) -> np.ndarray:
+def perturb_signal(
+    x: np.ndarray, noise_std: float = 0.0, dropout_rate: float = 0.0, seed: int = 42
+) -> np.ndarray:
     arr = np.asarray(x, dtype=float).copy()
     rng = np.random.default_rng(seed)
     if noise_std > 0:
