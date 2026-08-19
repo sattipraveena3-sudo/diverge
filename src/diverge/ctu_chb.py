@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
-import re
 
 import numpy as np
 import pandas as pd
@@ -20,7 +20,11 @@ class CTUMetadata:
 
 def _extract_float(text: str, keys: tuple[str, ...]) -> float | None:
     for key in keys:
-        match = re.search(rf"{re.escape(key)}\s*[:=]\s*(-?\d+(?:\.\d+)?)", text, flags=re.IGNORECASE)
+        match = re.search(
+            rf"^\s*#?\s*{re.escape(key)}(?:\s*\([^)]*\))?(?:\s*[:=]\s*|\s+)(-?\d+(?:\.\d+)?)\s*$",
+            text,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
         if match:
             return float(match.group(1))
     return None
@@ -39,7 +43,9 @@ def parse_header(path: str | Path) -> CTUMetadata:
     )
 
 
-def adverse_outcome(meta: CTUMetadata, ph_threshold: float = 7.05, apgar5_threshold: float = 7.0) -> int:
+def adverse_outcome(
+    meta: CTUMetadata, ph_threshold: float = 7.05, apgar5_threshold: float = 7.0
+) -> int:
     ph_positive = meta.ph is not None and meta.ph <= ph_threshold
     apgar_positive = meta.apgar5 is not None and meta.apgar5 < apgar5_threshold
     return int(ph_positive or apgar_positive)
@@ -57,11 +63,13 @@ def load_record(record_path: str | Path, fs: float = 4.0) -> tuple[pd.DataFrame,
     fhr_idx = next((i for i, name in enumerate(names) if "fhr" in name), 0)
     uc_idx = next((i for i, name in enumerate(names) if "uc" in name or "uter" in name), 1)
     signal = np.asarray(rec.p_signal, dtype=float)
-    frame = pd.DataFrame({
-        "time_s": np.arange(signal.shape[0], dtype=float) / fs,
-        "fhr": signal[:, fhr_idx],
-        "uc": signal[:, uc_idx],
-    })
+    frame = pd.DataFrame(
+        {
+            "time_s": np.arange(signal.shape[0], dtype=float) / fs,
+            "fhr": signal[:, fhr_idx],
+            "uc": signal[:, uc_idx],
+        }
+    )
     frame.loc[(frame.fhr <= 50) | (frame.fhr >= 220), "fhr"] = np.nan
     frame.loc[(frame.uc < 0) | (frame.uc > 100), "uc"] = np.nan
     meta = parse_header(record_path.with_suffix(".hea"))

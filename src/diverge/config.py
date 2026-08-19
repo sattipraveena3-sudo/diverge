@@ -1,5 +1,7 @@
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
+
+
 @dataclass(frozen=True)
 class Settings:
     data_source: str = os.getenv("DIVERGE_DATA_SOURCE", "synthetic")

@@ -43,7 +43,9 @@ def mutual_information_divergence(x: np.ndarray, y: np.ndarray, bins: int = 12) 
     return float(np.clip(1.0 - mi / norm, 0.0, 1.0))
 
 
-def spectral_coherence_divergence(x: np.ndarray, y: np.ndarray, fs: float = 1.0, nperseg: int = 64) -> float:
+def spectral_coherence_divergence(
+    x: np.ndarray, y: np.ndarray, fs: float = 1.0, nperseg: int = 64
+) -> float:
     a = np.asarray(x, dtype=float)
     b = np.asarray(y, dtype=float)
     valid = np.isfinite(a) & np.isfinite(b)

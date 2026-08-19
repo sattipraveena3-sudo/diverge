@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
+
 import numpy as np
 from sklearn.metrics import (
     average_precision_score,
@@ -9,6 +10,7 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
     roc_auc_score,
 )
+
 
 @dataclass
 class Metrics:
@@ -63,8 +65,13 @@ def evaluate_predictions(time_s, y_true, risk, event_start_s, confidence=None):
         auroc = float(roc_auc_score(y, prob))
         auprc = float(average_precision_score(y, prob))
     return Metrics(
-        precision=float(p), recall=float(r), f1=float(f1), alert_time_s=alert, lead_time_s=lead,
-        auroc=auroc, auprc=auprc,
+        precision=float(p),
+        recall=float(r),
+        f1=float(f1),
+        alert_time_s=alert,
+        lead_time_s=lead,
+        auroc=auroc,
+        auprc=auprc,
         balanced_accuracy=float(balanced_accuracy_score(y, pred)),
         mcc=float(matthews_corrcoef(y, pred)),
         false_alarm_rate_per_hour=false_alarm_rate_per_hour(np.asarray(time_s), y, pred),

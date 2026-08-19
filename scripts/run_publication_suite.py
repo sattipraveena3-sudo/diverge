@@ -9,8 +9,18 @@ import numpy as np
 import pandas as pd
 
 from diverge.ctu_chb import discover_records, load_record
-from diverge.ctu_features import CTU_DIVERGENCE_FEATURES, CTU_FULL_FEATURES, CTU_RAW_FEATURES, build_ctu_features
-from diverge.publication import calibration_points, paired_variant_test, repeated_record_cv, summarize_metric_frame
+from diverge.ctu_features import (
+    CTU_DIVERGENCE_FEATURES,
+    CTU_FULL_FEATURES,
+    CTU_RAW_FEATURES,
+    build_ctu_features,
+)
+from diverge.publication import (
+    calibration_points,
+    paired_variant_test,
+    repeated_record_cv,
+    summarize_metric_frame,
+)
 
 HORIZONS_MIN = (0, 5, 10, 20)
 SUMMARY_STATS = ("mean", "std", "p10", "p50", "p90", "max")
@@ -21,9 +31,15 @@ VARIANTS = {
     "information": ["mi_30", "mi_60", "mi_120"],
     "spectral": ["coherence_30", "coherence_60", "coherence_120"],
     "multiscale_relational": [
-        "lagcorr_30", "lagcorr_60", "lagcorr_120",
-        "mi_30", "mi_60", "mi_120",
-        "coherence_30", "coherence_60", "coherence_120",
+        "lagcorr_30",
+        "lagcorr_60",
+        "lagcorr_120",
+        "mi_30",
+        "mi_60",
+        "mi_120",
+        "coherence_30",
+        "coherence_60",
+        "coherence_120",
     ],
     "divergence_only": CTU_DIVERGENCE_FEATURES,
     "full": CTU_FULL_FEATURES,
@@ -34,7 +50,9 @@ def _summary_name(column: str, stat: str) -> str:
     return f"{column}__{stat}"
 
 
-def summarize_window(frame: pd.DataFrame, columns: list[str], horizon_min: int, window_min: int = 30) -> dict[str, float]:
+def summarize_window(
+    frame: pd.DataFrame, columns: list[str], horizon_min: int, window_min: int = 30
+) -> dict[str, float]:
     end_s = float(frame.time_s.max()) - horizon_min * 60.0
     start_s = max(float(frame.time_s.min()), end_s - window_min * 60.0)
     view = frame[(frame.time_s >= start_s) & (frame.time_s <= end_s)]
@@ -92,7 +110,9 @@ def feature_columns(columns: list[str]) -> list[str]:
     return [_summary_name(column, stat) for column in columns for stat in SUMMARY_STATS]
 
 
-def stress_feature_table(table: pd.DataFrame, columns: list[str], mode: str, seed: int = 42) -> pd.DataFrame:
+def stress_feature_table(
+    table: pd.DataFrame, columns: list[str], mode: str, seed: int = 42
+) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     stressed = table.copy()
     names = feature_columns(columns)
@@ -120,7 +140,12 @@ def save_variant_figure(report: dict, output: Path) -> None:
     means = [report["horizons"]["0"]["variants"][name]["auprc"]["mean"] for name in names]
     lower = [report["horizons"]["0"]["variants"][name]["auprc"]["lower"] for name in names]
     upper = [report["horizons"]["0"]["variants"][name]["auprc"]["upper"] for name in names]
-    yerr = np.array([[m - lo for m, lo in zip(means, lower)], [hi - m for m, hi in zip(means, upper)]])
+    yerr = np.array(
+        [
+            [m - lo for m, lo in zip(means, lower, strict=True)],
+            [hi - m for m, hi in zip(means, upper, strict=True)],
+        ]
+    )
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.bar(range(len(names)), means, yerr=yerr, capsize=3)
     ax.set_xticks(range(len(names)), names, rotation=35, ha="right")
@@ -151,7 +176,10 @@ def write_markdown(report: dict, path: Path) -> None:
     lines = [
         "# CTU-CHB Real-Data Results",
         "",
-        "> Generated automatically by `scripts/run_publication_suite.py`. Do not hand-edit numerical results.",
+        (
+            "> Generated automatically by `scripts/run_publication_suite.py`. "
+            "Do not hand-edit numerical results."
+        ),
         "",
         f"Cohort records discovered: **{report['cohort']['records_discovered']}**.",
         "",
@@ -173,19 +201,29 @@ def write_markdown(report: dict, path: Path) -> None:
         test = payload["paired_full_vs_raw_auprc"]
         lines.append(
             f"- **{horizon} min:** mean AUPRC delta {test['mean_delta']:.3f} "
-            f"(95% bootstrap CI {test['lower']:.3f} to {test['upper']:.3f}), p={test['p_value']:.4g}."
+            f"(95% bootstrap CI {test['lower']:.3f} to {test['upper']:.3f}), "
+            f"p={test['p_value']:.4g}."
         )
-    lines.extend([
-        "",
-        "## Interpretation guardrail",
-        "",
-        "These results evaluate a retrospective single-dataset research hypothesis. They are not evidence of clinical safety, prospective effectiveness, or medical-device performance. External and prospective validation are required before clinical claims.",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Interpretation guardrail",
+            "",
+            (
+                "These results evaluate a retrospective single-dataset research hypothesis. "
+                "They are not evidence of clinical safety, prospective effectiveness, or "
+                "medical-device performance. External and prospective validation are required "
+                "before clinical claims."
+            ),
+        ]
+    )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the full DiVerge publication experiment suite on CTU-CHB")
+    parser = argparse.ArgumentParser(
+        description="Run the full DiVerge publication experiment suite on CTU-CHB"
+    )
     parser.add_argument("data_root", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/publication"))
     parser.add_argument("--folds", type=int, default=5)
@@ -211,7 +249,11 @@ def main() -> None:
     all_fold_metrics = []
     for horizon, table in tables.items():
         table.to_csv(args.output_dir / f"cohort_horizon_{horizon}min.csv", index=False)
-        horizon_payload = {"n_records": int(len(table)), "prevalence": float(table.outcome.mean()), "variants": {}}
+        horizon_payload = {
+            "n_records": int(len(table)),
+            "prevalence": float(table.outcome.mean()),
+            "variants": {},
+        }
         fold_frames: dict[str, pd.DataFrame] = {}
         for variant, base_columns in VARIANTS.items():
             metrics, predictions = repeated_record_cv(
@@ -230,7 +272,9 @@ def main() -> None:
             all_predictions.append(predictions)
             all_fold_metrics.append(metrics.assign(horizon_min=horizon, variant=variant))
             if variant == "full" and horizon == 0:
-                calibration_points(predictions).to_csv(args.output_dir / "calibration_full.csv", index=False)
+                calibration_points(predictions).to_csv(
+                    args.output_dir / "calibration_full.csv", index=False
+                )
         horizon_payload["paired_full_vs_raw_auprc"] = paired_variant_test(
             fold_frames["raw_only"], fold_frames["full"], metric="auprc"
         )
@@ -248,8 +292,12 @@ def main() -> None:
         )
         report["robustness"][stress] = summarize_metric_frame(metrics)
 
-    pd.concat(all_predictions, ignore_index=True).to_csv(args.output_dir / "all_predictions.csv", index=False)
-    pd.concat(all_fold_metrics, ignore_index=True).to_csv(args.output_dir / "all_fold_metrics.csv", index=False)
+    pd.concat(all_predictions, ignore_index=True).to_csv(
+        args.output_dir / "all_predictions.csv", index=False
+    )
+    pd.concat(all_fold_metrics, ignore_index=True).to_csv(
+        args.output_dir / "all_fold_metrics.csv", index=False
+    )
     (args.output_dir / "results.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     save_variant_figure(report, figures / "ablation_auprc.png")
     save_horizon_figure(report, figures / "horizon_auprc.png")
