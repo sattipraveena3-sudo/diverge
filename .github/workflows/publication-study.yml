@@ -4,9 +4,19 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '41 2 1 * *'
+  push:
+    branches: [main]
+    paths:
+      - 'src/diverge/ctu_chb.py'
+      - 'src/diverge/ctu_features.py'
+      - 'src/diverge/publication.py'
+      - 'scripts/run_publication_suite.py'
+      - '.github/workflows/publication-study.yml'
+      - 'requirements.txt'
+      - 'pyproject.toml'
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: publication-${{ github.ref }}
@@ -20,15 +30,18 @@ jobs:
       MPLBACKEND: Agg
       PYTHONHASHSEED: '0'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
 
       - name: Install dependencies and project
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -e . --no-deps
 
@@ -41,7 +54,9 @@ jobs:
           wget -q -r -N -c -np \
             https://physionet.org/files/ctu-uhb-ctgdb/1.0.0/ \
             -P data/ctu_chb
-          test "$(find data/ctu_chb -name '*.hea' | wc -l)" -eq 552
+          count="$(find data/ctu_chb -name '*.hea' | wc -l)"
+          echo "Discovered ${count} CTU-CHB headers"
+          test "${count}" -eq 552
 
       - name: Run publication experiment suite
         run: |
@@ -59,9 +74,42 @@ jobs:
           test -s artifacts/publication/figures/ablation_auprc.png
           test -s artifacts/publication/figures/horizon_auprc.png
           test -s docs/REAL_DATA_RESULTS.md
+          python - <<'PY'
+          import json
+          from pathlib import Path
 
-      - name: Upload publication bundle
-        uses: actions/upload-artifact@v7
+          report = json.loads(Path('artifacts/publication/results.json').read_text())
+          assert report['cohort']['records_discovered'] == 552
+          assert set(report['horizons']) == {'0', '5', '10', '20'}
+          for horizon in report['horizons'].values():
+              assert horizon['n_records'] > 0
+              assert 'raw_only' in horizon['variants']
+              assert 'full' in horizon['variants']
+              for variant in horizon['variants'].values():
+                  for metric in ('auprc', 'auroc', 'brier', 'ece'):
+                      value = variant[metric]['mean']
+                      assert value == value
+          PY
+
+      - name: Commit verified real-data summary to repository
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            docs/REAL_DATA_RESULTS.md \
+            artifacts/publication/results.json \
+            artifacts/publication/figures/ablation_auprc.png \
+            artifacts/publication/figures/horizon_auprc.png
+          if git diff --cached --quiet; then
+            echo "Verified real-data summary is already current."
+          else
+            git commit -m "refresh verified CTU real-data results"
+            git push origin HEAD:main
+          fi
+
+      - name: Upload complete publication bundle
+        uses: actions/upload-artifact@v4
         with:
           name: diverge-ctu-publication-results
           path: |
