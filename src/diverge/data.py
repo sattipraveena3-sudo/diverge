@@ -22,6 +22,12 @@ def generate_synthetic_record(
     noise: float = 0.8,
     dropout_rate: float = 0.01,
 ) -> SignalRecord:
+    """Generate a deterministic two-signal research record.
+
+    Heart rate and SpO2 are used only as an illustrative pair. The core DiVerge
+    pipeline is sensor-agnostic and can consume any two synchronized numerical
+    physiological channels through :func:`canonicalize_signal_pair`.
+    """
     rng = np.random.default_rng(seed)
     t = np.arange(0, duration_s, 1.0 / sample_hz)
     latent = 0.7 * np.sin(t / 25) + 0.25 * np.sin(t / 7)
@@ -43,20 +49,80 @@ def generate_synthetic_record(
     )
 
 
-def align_and_impute(frame: pd.DataFrame, target_hz: float = 1.0) -> pd.DataFrame:
-    required = {"time_s", "hr", "spo2"}
+def canonicalize_signal_pair(
+    frame: pd.DataFrame,
+    signal_a: str,
+    signal_b: str,
+    *,
+    time_col: str = "time_s",
+    event_col: str | None = None,
+) -> pd.DataFrame:
+    """Map any synchronized physiological signal pair onto DiVerge's canonical schema.
+
+    The canonical schema is ``time_s``, ``signal_a``, ``signal_b`` and optional
+    ``event``. This keeps the generic research engine independent of clinical
+    domain-specific names while preserving domain adapters such as CTU-CHB.
+    """
+    required = {time_col, signal_a, signal_b}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"frame is missing required columns: {sorted(missing)}")
+    if signal_a == signal_b:
+        raise ValueError("signal_a and signal_b must refer to different columns")
+
+    columns = [time_col, signal_a, signal_b]
+    if event_col is not None:
+        if event_col not in frame.columns:
+            raise ValueError(f"event column {event_col!r} is not present in frame")
+        columns.append(event_col)
+
+    out = frame.loc[:, columns].copy()
+    rename = {time_col: "time_s", signal_a: "signal_a", signal_b: "signal_b"}
+    if event_col is not None:
+        rename[event_col] = "event"
+    out = out.rename(columns=rename)
+
+    for column in ("time_s", "signal_a", "signal_b"):
+        out[column] = pd.to_numeric(out[column], errors="coerce")
+    out = out.dropna(subset=["time_s"])
+    if len(out) < 10:
+        raise ValueError("at least 10 timestamped samples are required")
+    return out
+
+
+def align_and_impute_pair(frame: pd.DataFrame, target_hz: float = 1.0) -> pd.DataFrame:
+    """Align and interpolate a canonical ``signal_a``/``signal_b`` pair."""
+    required = {"time_s", "signal_a", "signal_b"}
     if not required.issubset(frame.columns):
         raise ValueError(f"frame must include {sorted(required)}")
     if target_hz <= 0:
         raise ValueError("target_hz must be positive")
     work = frame.sort_values("time_s").drop_duplicates("time_s").set_index("time_s")
+    if len(work) < 2 or float(work.index.max()) <= float(work.index.min()):
+        raise ValueError("time_s must contain at least two distinct increasing timestamps")
     grid = np.arange(float(work.index.min()), float(work.index.max()) + 1e-9, 1.0 / target_hz)
     work = work.reindex(work.index.union(grid)).interpolate(method="index").reindex(grid)
-    work[["hr", "spo2"]] = work[["hr", "spo2"]].interpolate(limit_direction="both")
+    work[["signal_a", "signal_b"]] = work[["signal_a", "signal_b"]].interpolate(
+        limit_direction="both"
+    )
+    if work[["signal_a", "signal_b"]].isna().any().any():
+        raise ValueError("signal pair contains no usable numerical values after interpolation")
     if "event" in work:
         work["event"] = work["event"].ffill().fillna(0).astype(int)
     work.index.name = "time_s"
     return work.reset_index()
+
+
+def align_and_impute(frame: pd.DataFrame, target_hz: float = 1.0) -> pd.DataFrame:
+    """Backward-compatible HR/SpO2 adapter for the original demonstration API."""
+    canonical = canonicalize_signal_pair(
+        frame,
+        "hr",
+        "spo2",
+        event_col="event" if "event" in frame.columns else None,
+    )
+    aligned = align_and_impute_pair(canonical, target_hz=target_hz)
+    return aligned.rename(columns={"signal_a": "hr", "signal_b": "spo2"})
 
 
 def robust_normalize(
@@ -64,6 +130,8 @@ def robust_normalize(
 ) -> pd.DataFrame:
     out = frame.copy()
     for col in columns:
+        if col not in out.columns:
+            raise ValueError(f"normalization column {col!r} is not present in frame")
         median = out[col].median()
         scale = (out[col] - median).abs().median()
         scale = 1.4826 * scale if scale > 1e-9 else max(float(out[col].std()), 1.0)
@@ -72,6 +140,11 @@ def robust_normalize(
 
 
 def load_ctu_chb_record(record_name: str, pn_dir: str = "ctu-uhb-ctgdb/1.0.0") -> SignalRecord:
+    """Load one CTU-CHB record as a domain-specific validation adapter.
+
+    CTU-CHB is one validation track for DiVerge, not the definition of the
+    sensor-agnostic framework.
+    """
     try:
         import wfdb
     except ImportError as exc:
