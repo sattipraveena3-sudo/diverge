@@ -1,5 +1,6 @@
 name: CTU Publication Study
 
+# Full real-data publication workflow. Results are committed only after verification.
 on:
   workflow_dispatch:
   schedule:
