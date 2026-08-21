@@ -19,7 +19,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import RepeatedStratifiedKFold
+from sklearn.model_selection import RepeatedStratifiedKFold, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -58,7 +58,7 @@ def expected_calibration_error(
 
 
 def select_threshold(y_true: np.ndarray, probability: np.ndarray) -> float:
-    """Select an operating point on training data only using balanced accuracy."""
+    """Select an operating point using balanced accuracy on validation predictions."""
     candidates = np.linspace(0.05, 0.95, 91)
     scores = [balanced_accuracy_score(y_true, probability >= threshold) for threshold in candidates]
     return float(candidates[int(np.argmax(scores))])
@@ -116,6 +116,22 @@ def make_model(seed: int = 42) -> Pipeline:
     )
 
 
+def _nested_training_threshold(X: np.ndarray, y: np.ndarray, seed: int) -> float:
+    labels, counts = np.unique(y, return_counts=True)
+    if labels.size != 2:
+        return 0.5
+    inner_splits = min(3, int(counts.min()))
+    if inner_splits < 2:
+        return 0.5
+    cv = StratifiedKFold(n_splits=inner_splits, shuffle=True, random_state=seed)
+    oof = np.zeros(len(y), dtype=float)
+    for inner_fold, (fit_idx, val_idx) in enumerate(cv.split(X, y)):
+        model = make_model(seed + 1000 + inner_fold)
+        model.fit(X[fit_idx], y[fit_idx])
+        oof[val_idx] = model.predict_proba(X[val_idx])[:, 1]
+    return select_threshold(y, oof)
+
+
 def repeated_record_cv(
     table: pd.DataFrame,
     feature_columns: list[str],
@@ -132,9 +148,13 @@ def repeated_record_cv(
     missing = required.difference(table.columns)
     if missing:
         raise ValueError(f"missing cross-validation columns: {sorted(missing)}")
+    if table["record_id"].duplicated().any():
+        raise ValueError("record_id values must be unique within a cohort table")
 
     X = table[feature_columns].to_numpy(dtype=float)
     y = table[outcome_column].to_numpy(dtype=int)
+    if not np.isfinite(X).all():
+        raise ValueError("feature matrix contains non-finite values")
     labels, counts = np.unique(y, return_counts=True)
     if labels.size != 2:
         raise ValueError(
@@ -156,17 +176,22 @@ def repeated_record_cv(
     metric_rows: list[dict] = []
     prediction_rows: list[dict] = []
     for fold, (train_idx, test_idx) in enumerate(cv.split(X, y)):
+        repeat = fold // effective_splits
+        split = fold % effective_splits
+        threshold = _nested_training_threshold(X[train_idx], y[train_idx], seed + fold)
         model = make_model(seed + fold)
         model.fit(X[train_idx], y[train_idx])
-        train_prob = model.predict_proba(X[train_idx])[:, 1]
-        threshold = select_threshold(y[train_idx], train_prob)
         test_prob = model.predict_proba(X[test_idx])[:, 1]
         metrics = classification_metrics(y[test_idx], test_prob, threshold)
-        metric_rows.append({"fold": fold, "threshold": threshold, **metrics.to_dict()})
+        metric_rows.append(
+            {"fold": fold, "repeat": repeat, "split": split, "threshold": threshold, **metrics.to_dict()}
+        )
         for idx, prob in zip(test_idx, test_prob, strict=True):
             prediction_rows.append(
                 {
                     "fold": fold,
+                    "repeat": repeat,
+                    "split": split,
                     "record_id": str(table.iloc[idx]["record_id"]),
                     "outcome": int(y[idx]),
                     "probability": float(prob),
@@ -178,6 +203,7 @@ def repeated_record_cv(
 
 
 def summarize_metric_frame(metrics: pd.DataFrame) -> dict[str, dict[str, float]]:
+    """Descriptive fold-level summaries; not used as record-level confidence intervals."""
     names = [
         "auroc",
         "auprc",
@@ -190,7 +216,66 @@ def summarize_metric_frame(metrics: pd.DataFrame) -> dict[str, dict[str, float]]
         "specificity",
         "f1",
     ]
-    return {name: bootstrap_mean_ci(metrics[name].to_numpy()) for name in names}
+    out: dict[str, dict[str, float]] = {}
+    for name in names:
+        arr = metrics[name].to_numpy(dtype=float)
+        out[name] = {
+            "mean": float(np.mean(arr)),
+            "lower": float(np.quantile(arr, 0.025)),
+            "upper": float(np.quantile(arr, 0.975)),
+        }
+    return out
+
+
+def aggregate_oof_predictions(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Average repeated out-of-fold probabilities once per record."""
+    grouped = predictions.groupby("record_id", sort=True)
+    result = grouped.agg(
+        outcome=("outcome", "first"),
+        probability=("probability", "mean"),
+        threshold=("threshold", "mean"),
+        n_predictions=("probability", "size"),
+    ).reset_index()
+    if (grouped["outcome"].nunique() != 1).any():
+        raise ValueError("inconsistent outcomes across repeated OOF predictions")
+    return result
+
+
+def bootstrap_record_metrics(
+    predictions: pd.DataFrame, n_boot: int = 2000, seed: int = 42
+) -> dict[str, dict[str, float]]:
+    """Record-level bootstrap CIs from averaged repeated OOF predictions."""
+    oof = aggregate_oof_predictions(predictions)
+    y = oof.outcome.to_numpy(dtype=int)
+    p = oof.probability.to_numpy(dtype=float)
+    t = oof.threshold.to_numpy(dtype=float)
+    point = classification_metrics(y, p, float(np.mean(t)))
+    metric_names = list(point.to_dict())
+    samples = {name: [] for name in metric_names}
+    rng = np.random.default_rng(seed)
+    n = len(oof)
+    attempts = 0
+    while len(samples["auprc"]) < n_boot and attempts < n_boot * 4:
+        attempts += 1
+        idx = rng.integers(0, n, size=n)
+        yb = y[idx]
+        if np.unique(yb).size < 2:
+            continue
+        mb = classification_metrics(yb, p[idx], float(np.mean(t[idx])))
+        for name, value in mb.to_dict().items():
+            samples[name].append(value)
+    if len(samples["auprc"]) < max(200, n_boot // 4):
+        raise RuntimeError("insufficient valid record-level bootstrap samples")
+    out: dict[str, dict[str, float]] = {}
+    point_dict = point.to_dict()
+    for name in metric_names:
+        arr = np.asarray(samples[name], dtype=float)
+        out[name] = {
+            "mean": float(point_dict[name]),
+            "lower": float(np.quantile(arr, 0.025)),
+            "upper": float(np.quantile(arr, 0.975)),
+        }
+    return out
 
 
 def paired_variant_test(
@@ -213,9 +298,10 @@ def paired_variant_test(
 
 
 def calibration_points(predictions: pd.DataFrame, bins: int = 10) -> pd.DataFrame:
+    oof = aggregate_oof_predictions(predictions)
     observed, predicted = calibration_curve(
-        predictions["outcome"].to_numpy(dtype=int),
-        predictions["probability"].to_numpy(dtype=float),
+        oof["outcome"].to_numpy(dtype=int),
+        oof["probability"].to_numpy(dtype=float),
         n_bins=bins,
         strategy="quantile",
     )
