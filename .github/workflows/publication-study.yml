@@ -21,15 +21,18 @@ permissions:
 
 concurrency:
   group: publication-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   publication-study:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 360
     env:
       MPLBACKEND: Agg
       PYTHONHASHSEED: '0'
+      OMP_NUM_THREADS: '2'
+      OPENBLAS_NUM_THREADS: '2'
+      MKL_NUM_THREADS: '2'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,23 +52,37 @@ jobs:
       - name: Run unit tests
         run: pytest -q
 
+      - name: Cache CTU-CHB dataset
+        id: cache-ctu
+        uses: actions/cache@v4
+        with:
+          path: data/ctu_chb
+          key: ctu-uhb-ctgdb-v1.0.0-552-records
+
       - name: Download CTU-CHB v1.0.0 from PhysioNet
+        if: steps.cache-ctu.outputs.cache-hit != 'true'
         run: |
           mkdir -p data/ctu_chb
           wget -q -r -N -c -np \
             https://physionet.org/files/ctu-uhb-ctgdb/1.0.0/ \
             -P data/ctu_chb
+
+      - name: Verify real dataset
+        run: |
           count="$(find data/ctu_chb -name '*.hea' | wc -l)"
           echo "Discovered ${count} CTU-CHB headers"
           test "${count}" -eq 552
+          test "$(find data/ctu_chb -name '*.dat' | wc -l)" -eq 552
 
       - name: Run publication experiment suite
         run: |
-          python scripts/run_publication_suite.py data/ctu_chb \
+          echo "Starting full leakage-safe 552-record real-data study at $(date -u)"
+          python -u scripts/run_publication_suite.py data/ctu_chb \
             --output-dir artifacts/publication \
             --folds 5 \
             --repeats 3 \
             --seed 42
+          echo "Publication suite finished at $(date -u)"
 
       - name: Verify publication outputs
         run: |
@@ -76,20 +93,22 @@ jobs:
           test -s artifacts/publication/figures/horizon_auprc.png
           test -s docs/REAL_DATA_RESULTS.md
           python - <<'PY'
-          import json
+          import json, math
           from pathlib import Path
-
           report = json.loads(Path('artifacts/publication/results.json').read_text())
+          assert report['protocol_version'] == '2.0-leakage-safe'
           assert report['cohort']['records_discovered'] == 552
           assert set(report['horizons']) == {'0', '5', '10', '20'}
-          for horizon in report['horizons'].values():
+          for name, horizon in report['horizons'].items():
               assert horizon['n_records'] > 0
-              assert 'raw_only' in horizon['variants']
-              assert 'full' in horizon['variants']
+              assert horizon['n_positive'] > 0 and horizon['n_negative'] > 0
+              assert 'raw_only' in horizon['variants'] and 'full' in horizon['variants']
               for variant in horizon['variants'].values():
                   for metric in ('auprc', 'auroc', 'brier', 'ece'):
-                      value = variant[metric]['mean']
-                      assert value == value
+                      value = float(variant[metric]['mean'])
+                      assert math.isfinite(value)
+                      assert 0.0 <= value <= 1.0
+          print('Verified real-data publication artifacts and metric ranges.')
           PY
 
       - name: Commit verified real-data summary to repository
