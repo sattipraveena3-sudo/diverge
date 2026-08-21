@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from scipy.spatial.distance import euclidean
 
 
 def rolling_cross_correlation_divergence(x, y, window: int = 60) -> np.ndarray:
@@ -15,43 +14,81 @@ def rolling_cross_correlation_divergence(x, y, window: int = 60) -> np.ndarray:
 
 
 def rolling_residual_divergence(x, y, window: int = 60) -> np.ndarray:
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    out = np.zeros_like(x, dtype=float)
-    for i in range(len(x)):
-        start = max(0, i - window + 1)
-        xx, yy = x[start : i + 1], y[start : i + 1]
-        if len(xx) < 4 or np.std(xx) < 1e-9:
-            continue
-        slope, intercept = np.polyfit(xx, yy, 1)
-        resid = yy - (slope * xx + intercept)
-        scale = np.median(np.abs(resid - np.median(resid))) * 1.4826 + 1e-6
-        out[i] = min(abs(resid[-1]) / (4.0 * scale), 1.0)
-    return out
+    """Rolling local linear-model failure without O(n*window) refits.
+
+    The slope/intercept are computed from rolling first and second moments.
+    The current residual is scaled by a rolling residual standard deviation.
+    This is deterministic, numerically stable, and fast enough for full CTU-CHB.
+    """
+    if window < 4:
+        raise ValueError("window must be >= 4")
+    xs = pd.Series(np.asarray(x, dtype=float))
+    ys = pd.Series(np.asarray(y, dtype=float))
+    minp = max(4, window // 3)
+    mx = xs.rolling(window, min_periods=minp).mean()
+    my = ys.rolling(window, min_periods=minp).mean()
+    exy = (xs * ys).rolling(window, min_periods=minp).mean()
+    ex2 = (xs * xs).rolling(window, min_periods=minp).mean()
+    cov = exy - mx * my
+    varx = (ex2 - mx * mx).clip(lower=1e-9)
+    slope = cov / varx
+    intercept = my - slope * mx
+    residual = ys - (slope * xs + intercept)
+    scale = residual.rolling(window, min_periods=minp).std().clip(lower=1e-6)
+    score = (residual.abs() / (4.0 * scale)).clip(0.0, 1.0)
+    return score.fillna(0.0).to_numpy()
 
 
-def dtw_distance(x: np.ndarray, y: np.ndarray) -> float:
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    if not len(x) or not len(y):
+def dtw_distance(x: np.ndarray, y: np.ndarray, radius: int | None = None) -> float:
+    """Banded dynamic-time-warping distance normalized by path length.
+
+    A Sakoe-Chiba band avoids the quadratic full matrix used by the earlier
+    implementation while retaining local temporal warping.
+    """
+    a = np.asarray(x, dtype=float)
+    b = np.asarray(y, dtype=float)
+    if not len(a) or not len(b):
         raise ValueError("DTW inputs cannot be empty")
-    cost = np.full((len(x) + 1, len(y) + 1), np.inf)
-    cost[0, 0] = 0.0
-    for i in range(1, len(x) + 1):
-        for j in range(1, len(y) + 1):
-            d = euclidean([x[i - 1]], [y[j - 1]])
-            cost[i, j] = d + min(cost[i - 1, j], cost[i, j - 1], cost[i - 1, j - 1])
-    return float(cost[-1, -1] / (len(x) + len(y)))
+    n, m = len(a), len(b)
+    radius = max(abs(n - m), radius if radius is not None else max(n, m) // 8)
+    previous = np.full(m + 1, np.inf)
+    previous[0] = 0.0
+    for i in range(1, n + 1):
+        current = np.full(m + 1, np.inf)
+        lo = max(1, i - radius)
+        hi = min(m, i + radius)
+        for j in range(lo, hi + 1):
+            d = abs(a[i - 1] - b[j - 1])
+            current[j] = d + min(previous[j], current[j - 1], previous[j - 1])
+        previous = current
+    return float(previous[m] / max(n + m, 1))
 
 
-def rolling_dtw_divergence(x, y, window: int = 30, stride: int = 5) -> np.ndarray:
+def _downsample_window(values: np.ndarray, max_points: int = 48) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    if len(values) <= max_points:
+        return values
+    edges = np.linspace(0, len(values), max_points + 1, dtype=int)
+    return np.asarray([values[edges[i] : edges[i + 1]].mean() for i in range(max_points)])
+
+
+def rolling_dtw_divergence(
+    x, y, window: int = 30, stride: int = 5, max_points: int = 48
+) -> np.ndarray:
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
-    out = np.zeros(len(x))
-    for i in range(window - 1, len(x), stride):
-        a = x[i - window + 1 : i + 1]
-        b = y[i - window + 1 : i + 1]
+    if len(x) != len(y):
+        raise ValueError("signals must have equal length")
+    if window < 4 or stride < 1:
+        raise ValueError("window must be >= 4 and stride must be >= 1")
+    out = np.full(len(x), np.nan, dtype=float)
+    anchors = list(range(window - 1, len(x), stride))
+    if anchors and anchors[-1] != len(x) - 1:
+        anchors.append(len(x) - 1)
+    for i in anchors:
+        a = _downsample_window(x[i - window + 1 : i + 1], max_points=max_points)
+        b = _downsample_window(y[i - window + 1 : i + 1], max_points=max_points)
         a = (a - a.mean()) / (a.std() + 1e-6)
         b = (b - b.mean()) / (b.std() + 1e-6)
         out[i] = min(dtw_distance(a, b) / 2.0, 1.0)
-    return pd.Series(out).replace(0, np.nan).ffill().fillna(0).to_numpy()
+    return pd.Series(out).interpolate(limit_direction="both").fillna(0.0).to_numpy()
