@@ -11,6 +11,8 @@ on:
       - 'src/diverge/ctu_chb.py'
       - 'src/diverge/ctu_features.py'
       - 'src/diverge/publication.py'
+      - 'src/diverge/advanced_divergence.py'
+      - 'src/diverge/divergence.py'
       - 'scripts/run_publication_suite.py'
       - '.github/workflows/publication-study.yml'
       - 'requirements.txt'
@@ -30,9 +32,9 @@ jobs:
     env:
       MPLBACKEND: Agg
       PYTHONHASHSEED: '0'
-      OMP_NUM_THREADS: '2'
-      OPENBLAS_NUM_THREADS: '2'
-      MKL_NUM_THREADS: '2'
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,11 +76,21 @@ jobs:
           test "${count}" -eq 552
           test "$(find data/ctu_chb -name '*.dat' | wc -l)" -eq 552
 
+      - name: Cache leakage-safe per-record features
+        uses: actions/cache@v4
+        with:
+          path: .cache/diverge/ctu_features
+          key: ctu-feature-cache-v3-${{ hashFiles('scripts/run_publication_suite.py', 'src/diverge/ctu_features.py', 'src/diverge/advanced_divergence.py', 'src/diverge/divergence.py', 'src/diverge/ctu_chb.py') }}
+          restore-keys: |
+            ctu-feature-cache-v3-
+
       - name: Run publication experiment suite
         run: |
           echo "Starting full leakage-safe 552-record real-data study at $(date -u)"
           python -u scripts/run_publication_suite.py data/ctu_chb \
             --output-dir artifacts/publication \
+            --feature-cache-dir .cache/diverge/ctu_features \
+            --workers 2 \
             --folds 5 \
             --repeats 3 \
             --seed 42
@@ -96,7 +108,7 @@ jobs:
           import json, math
           from pathlib import Path
           report = json.loads(Path('artifacts/publication/results.json').read_text())
-          assert report['protocol_version'] == '2.0-leakage-safe'
+          assert report['protocol_version'] == '3.0-leakage-safe-windowed'
           assert report['cohort']['records_discovered'] == 552
           assert set(report['horizons']) == {'0', '5', '10', '20'}
           for name, horizon in report['horizons'].items():
