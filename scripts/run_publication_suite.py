@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -14,6 +16,7 @@ from diverge.ctu_features import (
     CTU_FULL_FEATURES,
     CTU_RAW_FEATURES,
     build_ctu_features,
+    robust_location_scale,
 )
 from diverge.publication import (
     bootstrap_record_metrics,
@@ -26,7 +29,9 @@ from diverge.publication import (
 HORIZONS_MIN = (0, 5, 10, 20)
 SUMMARY_STATS = ("mean", "std", "p10", "p50", "p90", "max")
 OBSERVATION_WINDOW_MIN = 30
+FEATURE_LOOKBACK_MIN = 2
 MIN_OBSERVATION_MIN = 5
+FEATURE_CACHE_VERSION = "3.0-windowed-parallel"
 VARIANTS = {
     "raw_only": CTU_RAW_FEATURES,
     "classical_divergence": ["corr_div", "resid_div", "dtw_div"],
@@ -81,11 +86,7 @@ def summarize_window(
 
 
 def _truncate_before_horizon(raw: pd.DataFrame, horizon_min: int) -> pd.DataFrame:
-    """Remove the prediction horizon before any normalization or feature computation.
-
-    This is the key leakage guard: future samples cannot influence robust scaling,
-    interpolation, divergence features, or temporal summaries.
-    """
+    """Remove the prediction horizon before any normalization or feature computation."""
     end_s = float(raw.time_s.max()) - horizon_min * 60.0
     if end_s <= float(raw.time_s.min()):
         raise ValueError("record is shorter than requested prediction horizon")
@@ -96,23 +97,65 @@ def _truncate_before_horizon(raw: pd.DataFrame, horizon_min: int) -> pd.DataFram
     return truncated
 
 
-def build_cohort_tables(root: Path) -> tuple[dict[int, pd.DataFrame], dict]:
-    rows = {h: [] for h in HORIZONS_MIN}
-    headers = discover_records(root)
-    if not headers:
-        raise RuntimeError(f"no CTU-CHB .hea records found below {root}")
-    audit = {
-        "records_discovered": len(headers),
-        "unlabeled_records": 0,
-        "included_by_horizon": {str(h): 0 for h in HORIZONS_MIN},
-        "excluded_short_by_horizon": {str(h): 0 for h in HORIZONS_MIN},
+def _prepare_feature_segment(
+    truncated: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict[str, tuple[float, float]]]:
+    """Keep full pre-horizon normalization but limit expensive rolling work.
+
+    The publication features are summarized only over the final 30 minutes.
+    The longest relational look-back is 120 seconds, so expensive feature
+    extraction only needs the final 32 minutes. Robust normalization is still
+    estimated from the entire pre-horizon recording, preserving the protocol.
+    """
+    prepared = truncated.copy()
+    for col in ("fhr", "uc"):
+        prepared[col] = prepared[col].interpolate(limit_direction="both").ffill().bfill()
+        if not np.isfinite(prepared[col].to_numpy(dtype=float)).all():
+            raise ValueError(f"non-finite {col} values after interpolation")
+    normalization = {
+        "fhr": robust_location_scale(prepared["fhr"]),
+        "uc": robust_location_scale(prepared["uc"]),
     }
-    for index, header in enumerate(headers, start=1):
-        raw, meta = load_record(header)
-        outcome = adverse_outcome(meta)
-        if outcome is None:
-            audit["unlabeled_records"] += 1
-            continue
+    end_s = float(prepared.time_s.max())
+    context_s = (OBSERVATION_WINDOW_MIN + FEATURE_LOOKBACK_MIN) * 60.0
+    start_s = max(float(prepared.time_s.min()), end_s - context_s)
+    segment = prepared[prepared.time_s >= start_s].copy()
+    return segment, normalization
+
+
+def _cache_path(cache_dir: Path, record_id: str) -> Path:
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in record_id)
+    return cache_dir / f"{safe}.json"
+
+
+def _process_header(header_text: str, cache_dir_text: str | None) -> dict:
+    header = Path(header_text)
+    cache_dir = Path(cache_dir_text) if cache_dir_text else None
+    cache_file: Path | None = None
+    if cache_dir is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = _cache_path(cache_dir, header.stem)
+        if cache_file.exists():
+            try:
+                payload = json.loads(cache_file.read_text(encoding="utf-8"))
+                if payload.get("cache_version") == FEATURE_CACHE_VERSION:
+                    payload["cache_hit"] = True
+                    return payload
+            except (OSError, json.JSONDecodeError):
+                pass
+
+    raw, meta = load_record(header)
+    outcome = adverse_outcome(meta)
+    if outcome is None:
+        payload = {
+            "cache_version": FEATURE_CACHE_VERSION,
+            "record_id": meta.record_id,
+            "unlabeled": True,
+            "rows": {},
+            "excluded_horizons": [],
+            "cache_hit": False,
+        }
+    else:
         fs = float(raw.sampling_hz.iloc[0])
         base = {
             "record_id": meta.record_id,
@@ -124,20 +167,90 @@ def build_cohort_tables(root: Path) -> tuple[dict[int, pd.DataFrame], dict]:
             "uc_missing_fraction": float(raw.uc.isna().mean()),
             "sampling_hz": fs,
         }
+        rows: dict[str, dict] = {}
+        excluded: list[int] = []
         for horizon in HORIZONS_MIN:
             try:
                 truncated = _truncate_before_horizon(raw, horizon)
-                # Feature extraction happens only after horizon truncation to prevent leakage.
-                features = build_ctu_features(truncated, fs=fs)
+                segment, normalization = _prepare_feature_segment(truncated)
+                features = build_ctu_features(segment, fs=fs, normalization=normalization)
                 row = dict(base)
                 row.update(summarize_window(features, CTU_FULL_FEATURES))
-                rows[horizon].append(row)
-                audit["included_by_horizon"][str(horizon)] += 1
+                rows[str(horizon)] = row
             except ValueError:
-                audit["excluded_short_by_horizon"][str(horizon)] += 1
-                continue
-        if index % 25 == 0:
-            print(f"processed {index}/{len(headers)} records", flush=True)
+                excluded.append(horizon)
+        payload = {
+            "cache_version": FEATURE_CACHE_VERSION,
+            "record_id": meta.record_id,
+            "unlabeled": False,
+            "rows": rows,
+            "excluded_horizons": excluded,
+            "cache_hit": False,
+        }
+
+    if cache_file is not None:
+        tmp = cache_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(cache_file)
+    return payload
+
+
+def build_cohort_tables(
+    root: Path, workers: int = 1, feature_cache_dir: Path | None = None
+) -> tuple[dict[int, pd.DataFrame], dict]:
+    rows = {h: [] for h in HORIZONS_MIN}
+    headers = discover_records(root)
+    if not headers:
+        raise RuntimeError(f"no CTU-CHB .hea records found below {root}")
+    audit = {
+        "records_discovered": len(headers),
+        "unlabeled_records": 0,
+        "included_by_horizon": {str(h): 0 for h in HORIZONS_MIN},
+        "excluded_short_by_horizon": {str(h): 0 for h in HORIZONS_MIN},
+        "feature_cache_hits": 0,
+        "feature_cache_version": FEATURE_CACHE_VERSION,
+        "workers": int(workers),
+    }
+    header_args = [str(h) for h in headers]
+    cache_arg = str(feature_cache_dir) if feature_cache_dir is not None else None
+
+    if workers <= 1:
+        results = (_process_header(h, cache_arg) for h in header_args)
+        executor = None
+    else:
+        executor = ProcessPoolExecutor(max_workers=workers)
+        results = executor.map(
+            _process_header,
+            header_args,
+            [cache_arg] * len(header_args),
+            chunksize=1,
+        )
+
+    try:
+        for index, payload in enumerate(results, start=1):
+            if payload.get("cache_hit"):
+                audit["feature_cache_hits"] += 1
+            if payload.get("unlabeled"):
+                audit["unlabeled_records"] += 1
+            else:
+                for horizon in HORIZONS_MIN:
+                    key = str(horizon)
+                    row = payload.get("rows", {}).get(key)
+                    if row is not None:
+                        rows[horizon].append(row)
+                        audit["included_by_horizon"][key] += 1
+                    else:
+                        audit["excluded_short_by_horizon"][key] += 1
+            if index % 10 == 0 or index == len(headers):
+                print(
+                    f"processed {index}/{len(headers)} records "
+                    f"(cache hits={audit['feature_cache_hits']})",
+                    flush=True,
+                )
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=False)
+
     tables = {h: pd.DataFrame(items) for h, items in rows.items()}
     for horizon, table in tables.items():
         if table.empty:
@@ -146,6 +259,9 @@ def build_cohort_tables(root: Path) -> tuple[dict[int, pd.DataFrame], dict]:
             raise RuntimeError(f"duplicate record ids at {horizon}-min horizon")
         if table.outcome.nunique() != 2:
             raise RuntimeError(f"both outcome classes are required at {horizon}-min horizon")
+        numeric = table[feature_columns(CTU_FULL_FEATURES)].to_numpy(dtype=float)
+        if not np.isfinite(numeric).all():
+            raise RuntimeError(f"non-finite feature matrix at {horizon}-min horizon")
     return tables, audit
 
 
@@ -225,6 +341,7 @@ def write_markdown(report: dict, path: Path) -> None:
         f"Records discovered: **{cohort['records_discovered']}**; records without the predefined outcome metadata: **{cohort['unlabeled_records']}**.",
         "",
         "Prediction-horizon truncation is performed **before** interpolation, normalization, and feature extraction to prevent future-data leakage.",
+        "Expensive rolling features are evaluated only over the final 30-minute observation interval plus the 120-second look-back required by the longest relational window; robust normalization still uses the complete pre-horizon recording.",
         "Operating thresholds are selected by nested cross-validation using outer-training records only.",
         "Confidence intervals are record-level bootstrap intervals over averaged repeated out-of-fold predictions.",
         "",
@@ -269,14 +386,32 @@ def main() -> None:
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, min(2, os.cpu_count() or 1)),
+        help="parallel workers for per-record feature extraction",
+    )
+    parser.add_argument(
+        "--feature-cache-dir",
+        type=Path,
+        default=Path(".cache/diverge/ctu_features"),
+        help="persistent per-record feature cache",
+    )
     args = parser.parse_args()
+    if args.workers < 1:
+        raise ValueError("--workers must be >= 1")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     figures = args.output_dir / "figures"
     figures.mkdir(exist_ok=True)
 
-    tables, cohort_audit = build_cohort_tables(args.data_root)
+    tables, cohort_audit = build_cohort_tables(
+        args.data_root,
+        workers=args.workers,
+        feature_cache_dir=args.feature_cache_dir,
+    )
     report: dict = {
-        "protocol_version": "2.0-leakage-safe",
+        "protocol_version": "3.0-leakage-safe-windowed",
         "seed": args.seed,
         "folds": args.folds,
         "repeats": args.repeats,
@@ -306,7 +441,6 @@ def main() -> None:
                 seed=args.seed,
             )
             fold_frames[variant] = metrics
-            # Primary uncertainty comes from records, not dependent CV folds.
             horizon_payload["variants"][variant] = bootstrap_record_metrics(
                 predictions, seed=args.seed
             )
@@ -329,7 +463,7 @@ def main() -> None:
     base = tables[0]
     for stress in ("noise", "missing", "drift"):
         stressed = stress_feature_table(base, CTU_FULL_FEATURES, stress, seed=args.seed)
-        metrics, predictions = repeated_record_cv(
+        _, predictions = repeated_record_cv(
             stressed,
             feature_columns(CTU_FULL_FEATURES),
             n_splits=args.folds,
