@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from diverge.ctu_chb import discover_records, load_record
+from diverge.ctu_chb import adverse_outcome, discover_records, load_record
 from diverge.ctu_features import (
     CTU_DIVERGENCE_FEATURES,
     CTU_FULL_FEATURES,
@@ -16,6 +16,7 @@ from diverge.ctu_features import (
     build_ctu_features,
 )
 from diverge.publication import (
+    bootstrap_record_metrics,
     calibration_points,
     paired_variant_test,
     repeated_record_cv,
@@ -24,6 +25,8 @@ from diverge.publication import (
 
 HORIZONS_MIN = (0, 5, 10, 20)
 SUMMARY_STATS = ("mean", "std", "p10", "p50", "p90", "max")
+OBSERVATION_WINDOW_MIN = 30
+MIN_OBSERVATION_MIN = 5
 VARIANTS = {
     "raw_only": CTU_RAW_FEATURES,
     "classical_divergence": ["corr_div", "resid_div", "dtw_div"],
@@ -51,19 +54,19 @@ def _summary_name(column: str, stat: str) -> str:
 
 
 def summarize_window(
-    frame: pd.DataFrame, columns: list[str], horizon_min: int, window_min: int = 30
+    frame: pd.DataFrame, columns: list[str], window_min: int = OBSERVATION_WINDOW_MIN
 ) -> dict[str, float]:
-    end_s = float(frame.time_s.max()) - horizon_min * 60.0
+    end_s = float(frame.time_s.max())
     start_s = max(float(frame.time_s.min()), end_s - window_min * 60.0)
     view = frame[(frame.time_s >= start_s) & (frame.time_s <= end_s)]
     if len(view) < 32:
-        raise ValueError("insufficient samples before requested prediction horizon")
+        raise ValueError("insufficient samples in requested observation window")
     result: dict[str, float] = {}
     for column in columns:
         values = view[column].to_numpy(dtype=float)
         finite = values[np.isfinite(values)]
         if finite.size == 0:
-            finite = np.array([0.0])
+            raise ValueError(f"feature {column} has no finite values")
         summaries = {
             "mean": np.mean(finite),
             "std": np.std(finite),
@@ -77,33 +80,73 @@ def summarize_window(
     return result
 
 
-def build_cohort_tables(root: Path) -> dict[int, pd.DataFrame]:
+def _truncate_before_horizon(raw: pd.DataFrame, horizon_min: int) -> pd.DataFrame:
+    """Remove the prediction horizon before any normalization or feature computation.
+
+    This is the key leakage guard: future samples cannot influence robust scaling,
+    interpolation, divergence features, or temporal summaries.
+    """
+    end_s = float(raw.time_s.max()) - horizon_min * 60.0
+    if end_s <= float(raw.time_s.min()):
+        raise ValueError("record is shorter than requested prediction horizon")
+    truncated = raw[raw.time_s <= end_s].copy()
+    duration_min = (float(truncated.time_s.max()) - float(truncated.time_s.min())) / 60.0
+    if duration_min < MIN_OBSERVATION_MIN:
+        raise ValueError("insufficient pre-horizon observation duration")
+    return truncated
+
+
+def build_cohort_tables(root: Path) -> tuple[dict[int, pd.DataFrame], dict]:
     rows = {h: [] for h in HORIZONS_MIN}
     headers = discover_records(root)
     if not headers:
         raise RuntimeError(f"no CTU-CHB .hea records found below {root}")
+    audit = {
+        "records_discovered": len(headers),
+        "unlabeled_records": 0,
+        "included_by_horizon": {str(h): 0 for h in HORIZONS_MIN},
+        "excluded_short_by_horizon": {str(h): 0 for h in HORIZONS_MIN},
+    }
     for index, header in enumerate(headers, start=1):
         raw, meta = load_record(header)
-        features = build_ctu_features(raw)
+        outcome = adverse_outcome(meta)
+        if outcome is None:
+            audit["unlabeled_records"] += 1
+            continue
+        fs = float(raw.sampling_hz.iloc[0])
         base = {
             "record_id": meta.record_id,
-            "outcome": int(raw.adverse_outcome.iloc[0]),
+            "outcome": int(outcome),
             "ph": meta.ph,
             "apgar5": meta.apgar5,
-            "duration_min": float(features.time_s.max() / 60.0),
+            "duration_min": float(raw.time_s.max() / 60.0),
             "fhr_missing_fraction": float(raw.fhr.isna().mean()),
             "uc_missing_fraction": float(raw.uc.isna().mean()),
+            "sampling_hz": fs,
         }
         for horizon in HORIZONS_MIN:
             try:
+                truncated = _truncate_before_horizon(raw, horizon)
+                # Feature extraction happens only after horizon truncation to prevent leakage.
+                features = build_ctu_features(truncated, fs=fs)
                 row = dict(base)
-                row.update(summarize_window(features, CTU_FULL_FEATURES, horizon))
+                row.update(summarize_window(features, CTU_FULL_FEATURES))
                 rows[horizon].append(row)
+                audit["included_by_horizon"][str(horizon)] += 1
             except ValueError:
+                audit["excluded_short_by_horizon"][str(horizon)] += 1
                 continue
         if index % 25 == 0:
             print(f"processed {index}/{len(headers)} records", flush=True)
-    return {h: pd.DataFrame(items) for h, items in rows.items()}
+    tables = {h: pd.DataFrame(items) for h, items in rows.items()}
+    for horizon, table in tables.items():
+        if table.empty:
+            raise RuntimeError(f"no eligible labeled records at {horizon}-min horizon")
+        if table.record_id.duplicated().any():
+            raise RuntimeError(f"duplicate record ids at {horizon}-min horizon")
+        if table.outcome.nunique() != 2:
+            raise RuntimeError(f"both outcome classes are required at {horizon}-min horizon")
+    return tables, audit
 
 
 def feature_columns(columns: list[str]) -> list[str]:
@@ -173,15 +216,17 @@ def save_horizon_figure(report: dict, output: Path) -> None:
 
 
 def write_markdown(report: dict, path: Path) -> None:
+    cohort = report["cohort"]
     lines = [
         "# CTU-CHB Real-Data Results",
         "",
-        (
-            "> Generated automatically by `scripts/run_publication_suite.py`. "
-            "Do not hand-edit numerical results."
-        ),
+        "> Generated automatically from real CTU-CHB records by `scripts/run_publication_suite.py`. Numerical values are never hand-entered.",
         "",
-        f"Cohort records discovered: **{report['cohort']['records_discovered']}**.",
+        f"Records discovered: **{cohort['records_discovered']}**; records without the predefined outcome metadata: **{cohort['unlabeled_records']}**.",
+        "",
+        "Prediction-horizon truncation is performed **before** interpolation, normalization, and feature extraction to prevent future-data leakage.",
+        "Operating thresholds are selected by nested cross-validation using outer-training records only.",
+        "Confidence intervals are record-level bootstrap intervals over averaged repeated out-of-fold predictions.",
         "",
         "## Primary 0-minute-horizon comparison",
         "",
@@ -196,25 +241,20 @@ def write_markdown(report: dict, path: Path) -> None:
             f"{r['mean']:.3f} [{r['lower']:.3f}, {r['upper']:.3f}] | "
             f"{metrics['brier']['mean']:.3f} | {metrics['ece']['mean']:.3f} |"
         )
-    lines.extend(["", "## Full vs raw paired tests", ""])
+    lines.extend(["", "## Full vs raw fold-aligned sensitivity analysis", ""])
     for horizon, payload in report["horizons"].items():
         test = payload["paired_full_vs_raw_auprc"]
         lines.append(
-            f"- **{horizon} min:** mean AUPRC delta {test['mean_delta']:.3f} "
-            f"(95% bootstrap CI {test['lower']:.3f} to {test['upper']:.3f}), "
-            f"p={test['p_value']:.4g}."
+            f"- **{horizon} min:** mean fold AUPRC delta {test['mean_delta']:.3f} "
+            f"(bootstrap interval {test['lower']:.3f} to {test['upper']:.3f}), "
+            f"Wilcoxon p={test['p_value']:.4g}."
         )
     lines.extend(
         [
             "",
             "## Interpretation guardrail",
             "",
-            (
-                "These results evaluate a retrospective single-dataset research hypothesis. "
-                "They are not evidence of clinical safety, prospective effectiveness, or "
-                "medical-device performance. External and prospective validation are required "
-                "before clinical claims."
-            ),
+            "These are retrospective single-dataset research results. They are not evidence of clinical safety, prospective effectiveness, or medical-device performance. External and prospective validation are required before clinical claims.",
         ]
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -222,7 +262,7 @@ def write_markdown(report: dict, path: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run the full DiVerge publication experiment suite on CTU-CHB"
+        description="Run the leakage-safe DiVerge publication experiment suite on CTU-CHB"
     )
     parser.add_argument("data_root", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/publication"))
@@ -234,13 +274,13 @@ def main() -> None:
     figures = args.output_dir / "figures"
     figures.mkdir(exist_ok=True)
 
-    tables = build_cohort_tables(args.data_root)
+    tables, cohort_audit = build_cohort_tables(args.data_root)
     report: dict = {
-        "protocol_version": "1.0",
+        "protocol_version": "2.0-leakage-safe",
         "seed": args.seed,
         "folds": args.folds,
         "repeats": args.repeats,
-        "cohort": {"records_discovered": len(discover_records(args.data_root))},
+        "cohort": cohort_audit,
         "horizons": {},
         "robustness": {},
     }
@@ -251,6 +291,8 @@ def main() -> None:
         table.to_csv(args.output_dir / f"cohort_horizon_{horizon}min.csv", index=False)
         horizon_payload = {
             "n_records": int(len(table)),
+            "n_positive": int(table.outcome.sum()),
+            "n_negative": int((table.outcome == 0).sum()),
             "prevalence": float(table.outcome.mean()),
             "variants": {},
         }
@@ -264,7 +306,11 @@ def main() -> None:
                 seed=args.seed,
             )
             fold_frames[variant] = metrics
-            horizon_payload["variants"][variant] = summarize_metric_frame(metrics)
+            # Primary uncertainty comes from records, not dependent CV folds.
+            horizon_payload["variants"][variant] = bootstrap_record_metrics(
+                predictions, seed=args.seed
+            )
+            horizon_payload["variants"][variant]["fold_distribution"] = summarize_metric_frame(metrics)
             metrics.assign(horizon_min=horizon, variant=variant).to_csv(
                 args.output_dir / f"fold_metrics_{variant}_{horizon}min.csv", index=False
             )
@@ -283,14 +329,14 @@ def main() -> None:
     base = tables[0]
     for stress in ("noise", "missing", "drift"):
         stressed = stress_feature_table(base, CTU_FULL_FEATURES, stress, seed=args.seed)
-        metrics, _ = repeated_record_cv(
+        metrics, predictions = repeated_record_cv(
             stressed,
             feature_columns(CTU_FULL_FEATURES),
             n_splits=args.folds,
             n_repeats=args.repeats,
             seed=args.seed,
         )
-        report["robustness"][stress] = summarize_metric_frame(metrics)
+        report["robustness"][stress] = bootstrap_record_metrics(predictions, seed=args.seed)
 
     pd.concat(all_predictions, ignore_index=True).to_csv(
         args.output_dir / "all_predictions.csv", index=False
