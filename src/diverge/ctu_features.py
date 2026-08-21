@@ -31,12 +31,20 @@ CTU_DIVERGENCE_FEATURES = [
 CTU_FULL_FEATURES = CTU_RAW_FEATURES + CTU_DIVERGENCE_FEATURES
 
 
-def _robust_z(series: pd.Series) -> pd.Series:
+def robust_location_scale(series: pd.Series) -> tuple[float, float]:
     s = series.astype(float)
     median = float(s.median())
     mad = float((s - median).abs().median()) * 1.4826
     scale = mad if mad > 1e-6 else max(float(s.std()), 1e-6)
-    return ((s - median) / scale).clip(-8.0, 8.0)
+    return median, scale
+
+
+def _robust_z(
+    series: pd.Series, location_scale: tuple[float, float] | None = None
+) -> pd.Series:
+    s = series.astype(float)
+    median, scale = location_scale if location_scale is not None else robust_location_scale(s)
+    return ((s - median) / max(scale, 1e-6)).clip(-8.0, 8.0)
 
 
 def _fuse(frame: pd.DataFrame, columns: list[str]) -> np.ndarray:
@@ -44,7 +52,18 @@ def _fuse(frame: pd.DataFrame, columns: list[str]) -> np.ndarray:
     return np.clip(np.nanmedian(values, axis=1), 0.0, 1.0)
 
 
-def build_ctu_features(frame: pd.DataFrame, fs: float = 4.0) -> pd.DataFrame:
+def build_ctu_features(
+    frame: pd.DataFrame,
+    fs: float = 4.0,
+    normalization: dict[str, tuple[float, float]] | None = None,
+) -> pd.DataFrame:
+    """Build CTU relational features.
+
+    ``normalization`` can contain precomputed robust location/scale pairs for
+    ``fhr`` and ``uc``. This lets the publication runner preserve normalization
+    from the entire pre-horizon recording while computing expensive rolling
+    features only on the final observation window plus required look-back.
+    """
     required = {"time_s", "fhr", "uc"}
     missing = required.difference(frame.columns)
     if missing:
@@ -52,15 +71,14 @@ def build_ctu_features(frame: pd.DataFrame, fs: float = 4.0) -> pd.DataFrame:
     work = frame.copy()
     for col in ("fhr", "uc"):
         work[col] = work[col].interpolate(limit_direction="both").ffill().bfill()
-    work["fhr_z"] = _robust_z(work["fhr"])
-    work["uc_z"] = _robust_z(work["uc"])
+    normalization = normalization or {}
+    work["fhr_z"] = _robust_z(work["fhr"], normalization.get("fhr"))
+    work["uc_z"] = _robust_z(work["uc"], normalization.get("uc"))
     work["fhr_slope"] = work["fhr_z"].diff(max(1, int(fs * 5))).fillna(0.0) / 5.0
     work["uc_slope"] = work["uc_z"].diff(max(1, int(fs * 5))).fillna(0.0) / 5.0
     window = max(12, int(fs * 60))
     work["corr_div"] = rolling_cross_correlation_divergence(work.fhr_z, work.uc_z, window)
     work["resid_div"] = rolling_residual_divergence(work.fhr_z, work.uc_z, window)
-    # DTW is deliberately evaluated sparsely at 30-second anchors; the dense
-    # series is interpolated inside rolling_dtw_divergence.
     work["dtw_div"] = rolling_dtw_divergence(
         work.fhr_z,
         work.uc_z,
