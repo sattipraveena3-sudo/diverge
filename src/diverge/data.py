@@ -85,8 +85,11 @@ def canonicalize_signal_pair(
     for column in ("time_s", "signal_a", "signal_b"):
         out[column] = pd.to_numeric(out[column], errors="coerce")
     out = out.dropna(subset=["time_s"])
-    if len(out) < 10:
-        raise ValueError("at least 10 timestamped samples are required")
+    # Canonicalization only validates and renames a synchronized signal pair.
+    # Two distinct samples are sufficient for the downstream alignment step;
+    # feature builders enforce their own larger window requirements.
+    if len(out) < 2:
+        raise ValueError("at least two timestamped samples are required")
     return out
 
 
