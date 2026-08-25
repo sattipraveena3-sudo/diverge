@@ -39,9 +39,7 @@ def robust_location_scale(series: pd.Series) -> tuple[float, float]:
     return median, scale
 
 
-def _robust_z(
-    series: pd.Series, location_scale: tuple[float, float] | None = None
-) -> pd.Series:
+def _robust_z(series: pd.Series, location_scale: tuple[float, float] | None = None) -> pd.Series:
     s = series.astype(float)
     median, scale = location_scale if location_scale is not None else robust_location_scale(s)
     return ((s - median) / max(scale, 1e-6)).clip(-8.0, 8.0)

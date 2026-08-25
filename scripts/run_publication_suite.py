@@ -336,14 +336,33 @@ def write_markdown(report: dict, path: Path) -> None:
     lines = [
         "# CTU-CHB Real-Data Results",
         "",
-        "> Generated automatically from real CTU-CHB records by `scripts/run_publication_suite.py`. Numerical values are never hand-entered.",
+        (
+            "> Generated automatically from real CTU-CHB records by "
+            "`scripts/run_publication_suite.py`. Numerical values are never hand-entered."
+        ),
         "",
-        f"Records discovered: **{cohort['records_discovered']}**; records without the predefined outcome metadata: **{cohort['unlabeled_records']}**.",
+        (
+            f"Records discovered: **{cohort['records_discovered']}**; records without the "
+            f"predefined outcome metadata: **{cohort['unlabeled_records']}**."
+        ),
         "",
-        "Prediction-horizon truncation is performed **before** interpolation, normalization, and feature extraction to prevent future-data leakage.",
-        "Expensive rolling features are evaluated only over the final 30-minute observation interval plus the 120-second look-back required by the longest relational window; robust normalization still uses the complete pre-horizon recording.",
-        "Operating thresholds are selected by nested cross-validation using outer-training records only.",
-        "Confidence intervals are record-level bootstrap intervals over averaged repeated out-of-fold predictions.",
+        (
+            "Prediction-horizon truncation is performed **before** interpolation, normalization, "
+            "and feature extraction to prevent future-data leakage."
+        ),
+        (
+            "Expensive rolling features are evaluated only over the final 30-minute observation "
+            "interval plus the 120-second look-back required by the longest relational window; "
+            "robust normalization still uses the complete pre-horizon recording."
+        ),
+        (
+            "Operating thresholds are selected by nested cross-validation using outer-training "
+            "records only."
+        ),
+        (
+            "Confidence intervals are record-level bootstrap intervals over averaged repeated "
+            "out-of-fold predictions."
+        ),
         "",
         "## Primary 0-minute-horizon comparison",
         "",
@@ -371,7 +390,11 @@ def write_markdown(report: dict, path: Path) -> None:
             "",
             "## Interpretation guardrail",
             "",
-            "These are retrospective single-dataset research results. They are not evidence of clinical safety, prospective effectiveness, or medical-device performance. External and prospective validation are required before clinical claims.",
+            (
+                "These are retrospective single-dataset research results. They are not evidence "
+                "of clinical safety, prospective effectiveness, or medical-device performance. "
+                "External and prospective validation are required before clinical claims."
+            ),
         ]
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -444,7 +467,9 @@ def main() -> None:
             horizon_payload["variants"][variant] = bootstrap_record_metrics(
                 predictions, seed=args.seed
             )
-            horizon_payload["variants"][variant]["fold_distribution"] = summarize_metric_frame(metrics)
+            horizon_payload["variants"][variant]["fold_distribution"] = summarize_metric_frame(
+                metrics
+            )
             metrics.assign(horizon_min=horizon, variant=variant).to_csv(
                 args.output_dir / f"fold_metrics_{variant}_{horizon}min.csv", index=False
             )

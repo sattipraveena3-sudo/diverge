@@ -13,8 +13,8 @@ st.caption(
 )
 
 st.info(
-    "Core hypothesis: risk may first appear as a change in the relationship between normally coupled "
-    "signals, before either channel individually crosses an abnormal threshold."
+    "Core hypothesis: risk may first appear as a change in the relationship between normally "
+    "coupled signals, before either channel individually crosses an abnormal threshold."
 )
 
 seed = st.sidebar.number_input("Synthetic demonstration seed", 0, 10000, 42)
@@ -60,9 +60,10 @@ st.markdown(
     """
 ### How to interpret this demo
 
-The synthetic generator intentionally creates relational breakdown before overt threshold abnormalities. Its
-purpose is to validate the software path, not to prove clinical effectiveness. Real scientific evidence must
-come from prespecified labeled datasets and held-out evaluation. CTU-CHB is implemented as one such
-validation track; future datasets can use other physiological signal pairs without changing the core idea.
+The synthetic generator intentionally creates relational breakdown before overt threshold
+abnormalities. Its purpose is to validate the software path, not to prove clinical effectiveness.
+Real scientific evidence must come from prespecified labeled datasets and held-out evaluation.
+CTU-CHB is implemented as one such validation track; future datasets can use other physiological
+signal pairs without changing the core idea.
 """
 )

@@ -184,7 +184,13 @@ def repeated_record_cv(
         test_prob = model.predict_proba(X[test_idx])[:, 1]
         metrics = classification_metrics(y[test_idx], test_prob, threshold)
         metric_rows.append(
-            {"fold": fold, "repeat": repeat, "split": split, "threshold": threshold, **metrics.to_dict()}
+            {
+                "fold": fold,
+                "repeat": repeat,
+                "split": split,
+                "threshold": threshold,
+                **metrics.to_dict(),
+            }
         )
         for idx, prob in zip(test_idx, test_prob, strict=True):
             prediction_rows.append(

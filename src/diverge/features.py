@@ -31,9 +31,7 @@ def _build_canonical_features(work: pd.DataFrame, window: int) -> pd.DataFrame:
     work["corr_div"] = rolling_cross_correlation_divergence(
         work["signal_a_z"], work["signal_b_z"], window
     )
-    work["resid_div"] = rolling_residual_divergence(
-        work["signal_a_z"], work["signal_b_z"], window
-    )
+    work["resid_div"] = rolling_residual_divergence(work["signal_a_z"], work["signal_b_z"], window)
     work["dtw_div"] = rolling_dtw_divergence(
         work["signal_a_z"], work["signal_b_z"], max(12, window // 2), stride=5
     )
